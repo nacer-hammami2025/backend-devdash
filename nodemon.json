@@ -1,0 +1,16 @@
+{
+    "ignore": [
+        "logs/*",
+        "**/*.log",
+        "frontend/*",
+        "**/node_modules/**"
+    ],
+    "watch": [
+        "index.js",
+        "routes",
+        "models",
+        "middleware",
+        "utils"
+    ],
+    "ext": "js,json"
+}

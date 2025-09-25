@@ -1,0 +1,100 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Fix: Frontend (eslint+prettier)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"npx eslint \"src/**/*.{js,jsx,ts,tsx}\" --fix; npx prettier -w \"src/**/*.{js,jsx,ts,tsx,css,scss,json,md}\""
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/frontend"
+			},
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Fix: Backend (eslint+prettier)",
+			"type": "shell",
+			"command": "powershell",
+			"args": [
+				"-NoProfile",
+				"-ExecutionPolicy",
+				"Bypass",
+				"-Command",
+				"npx eslint \"**/*.js\" --fix; npx prettier -w \"**/*.{js,json,md}\""
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/backend"
+			},
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Fix: All",
+			"dependsOn": [
+				"Fix: Backend (eslint+prettier)",
+				"Fix: Frontend (eslint+prettier)"
+			],
+			"dependsOrder": "sequence",
+			"group": "build"
+		},
+		{
+			"label": "Dev: Backend",
+			"type": "shell",
+			"command": "npm run dev",
+			"options": {
+				"cwd": "${workspaceFolder}/backend"
+			},
+			"isBackground": true
+		},
+		{
+			"label": "Dev: Frontend (LAN)",
+			"type": "shell",
+			"command": "npm run dev -- --host",
+			"options": {
+				"cwd": "${workspaceFolder}/frontend"
+			},
+			"isBackground": true
+		},
+		{
+			"label": "Dev: Full Stack",
+			"dependsOn": [
+				"Dev: Backend",
+				"Dev: Frontend (LAN)"
+			],
+			"dependsOrder": "parallel",
+			"group": "build"
+		},
+		{
+			"label": "Test: Functional (auto-start)",
+			"type": "shell",
+			"command": "node test-functional.js",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": {
+				"kind": "test",
+				"isDefault": true
+			}
+		},
+		{
+			"label": "Test: All",
+			"type": "shell",
+			"command": "node test-all.js",
+			"options": {
+				"cwd": "${workspaceFolder}"
+			},
+			"group": "test"
+		}
+	]
+}

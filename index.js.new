@@ -1,0 +1,82 @@
+require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const logger = require('./utils/logger');
+
+const app = express();
+
+// Configuration de la sécurité simplifiée pour le développement
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginOpenerPolicy: { policy: "unsafe-none" }
+}));
+
+// Configuration CORS simplifiée
+app.use(cors({
+  origin: true, // Permettre toutes les origines en développement
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin']
+}));
+
+// Parse JSON bodies
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Logging
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+}
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use('/api/', limiter);
+
+// Routes
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/users', require('./routes/users'));
+app.use('/api/projects', require('./routes/projects'));
+app.use('/api/tasks', require('./routes/tasks'));
+
+// Error handling
+app.use((err, req, res, next) => {
+  logger.error(err.stack);
+  res.status(500).send({ message: 'Something broke!' });
+});
+
+// MongoDB connection
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => {
+    console.log('✅ MongoDB connected');
+    
+    // Start server
+    const PORT = process.env.PORT || 3000;
+    let currentPort = PORT;
+    
+    const startServer = () => {
+      const server = app.listen(currentPort, () => {
+        console.log(`🚀 Server running on http://localhost:${currentPort}`);
+      }).on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          console.log(`Port ${currentPort} is in use, trying another port...`);
+          currentPort++;
+          startServer();
+        } else {
+          console.error('Server failed to start:', err);
+        }
+      });
+    };
+    
+    startServer();
+  })
+  .catch(err => {
+    console.error('Failed to connect to MongoDB:', err);
+    process.exit(1);
+  });

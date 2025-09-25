@@ -1,0 +1,134 @@
+require('dotenv').config();
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const logger = require('./utils/logger');
+
+const app = express();
+
+// Security configuration
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginOpenerPolicy: { policy: "unsafe-none" }
+}));
+
+// Body parsers - must be before CORS
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// CORS configuration
+const allowedOrigins = ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175', 'http://localhost:5176', 'http://localhost:5177'];
+
+app.use(cors({
+  origin: function(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'X-Session-Id', 'x-session-id'],
+  exposedHeaders: ['X-Session-Id', 'x-session-id']
+}));
+
+// Logging
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+}
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use('/api/', limiter);
+
+// Import routes
+const testRoutes = require('./routes/test');
+const projectRoutes = require('./routes/projects');
+const taskRoutes = require('./routes/tasks');
+const userRoutes = require('./routes/users');
+const authRoutes = require('./routes/auth');
+
+app.use('/api/test', testRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/auth', authRoutes);
+
+// Error handling
+app.use((err, req, res, next) => {
+  logger.error(err.stack);
+  res.status(500).send({ 
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Something broke!',
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  });
+});
+
+// Start server with automatic port selection
+const findAvailablePort = async (startPort) => {
+  const maxAttempts = 10;
+  for (let port = startPort; port < startPort + maxAttempts; port++) {
+    try {
+      const server = await new Promise((resolve, reject) => {
+        const srv = app.listen(port)
+          .once('listening', () => {
+            resolve(srv);
+          })
+          .once('error', (err) => {
+            if (err.code === 'EADDRINUSE') {
+              resolve(false);
+            } else {
+              reject(err);
+            }
+          });
+      });
+
+      if (server) {
+        console.log(`🚀 Server running on http://localhost:${port}`);
+        return server;
+      }
+      console.log(`Port ${port} is in use, trying next port...`);
+    } catch (err) {
+      console.error('Error starting server:', err);
+      process.exit(1);
+    }
+  }
+  throw new Error(`Could not find an available port after ${maxAttempts} attempts`);
+};
+
+// Connect to MongoDB and start server
+mongoose.connect(process.env.MONGO_URI)
+  .then(async () => {
+    console.log('✅ MongoDB connected');
+    mongoose.set('debug', process.env.NODE_ENV === 'development');
+    
+    try {
+      const seed = require('./seed');
+      await seed();
+      console.log('✅ Database seeded successfully');
+    } catch (error) {
+      if (error.code === 11000) {
+        console.log('⚠️ Database already seeded (skipping)');
+      } else {
+        console.error('Error seeding database:', error);
+      }
+    }
+    
+    const PORT = process.env.PORT || 3000;
+    await findAvailablePort(PORT);
+  })
+  .catch(err => {
+    console.error('Failed to connect to MongoDB:', err);
+    process.exit(1);
+  });
+  })
+  .catch(err => {
+    console.error('Failed to connect to MongoDB:', err);
+    process.exit(1);
+  });

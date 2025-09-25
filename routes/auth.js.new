@@ -1,0 +1,211 @@
+const express = require('express');
+const router = express.Router();
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
+const speakeasy = require('speakeasy');
+const qrcode = require('qrcode');
+const User = require('../models/User');
+const Session = require('../models/Session');
+const AuditLog = require('../models/AuditLog');
+const auth = require('../middleware/auth');
+
+// Verify 2FA code
+router.post('/verify-2fa', async (req, res) => {
+  try {
+    const { code, tempToken } = req.body;
+
+    if (!code || !tempToken) {
+      return res.status(400).json({ message: 'Code and tempToken are required' });
+    }
+
+    // Verify temp token
+    let decoded;
+    try {
+      decoded = jwt.verify(tempToken, process.env.JWT_SECRET);
+    } catch (error) {
+      return res.status(401).json({ message: 'Invalid or expired token' });
+    }
+
+    if (!decoded.requiresVerification) {
+      return res.status(401).json({ message: 'Invalid token type' });
+    }
+
+    // Get user
+    const user = await User.findById(decoded.userId)
+      .select('+twoFactorSecret +backupCodes');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Verify 2FA code
+    const verified = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: 'base32',
+      token: code,
+      window: 1
+    });
+
+    if (!verified) {
+      // Check if it's a valid backup code
+      const backupCodeMatch = user.backupCodes.find(bc => !bc.used && bc.code === code);
+      if (!backupCodeMatch) {
+        await AuditLog.create({
+          userId: user._id,
+          action: 'failed_2fa',
+          status: 'failure',
+          details: 'Invalid 2FA code',
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent']
+        });
+        return res.status(401).json({ message: 'Invalid 2FA code' });
+      }
+
+      // Mark backup code as used
+      backupCodeMatch.used = true;
+      await user.save();
+    }
+
+    // Create new token
+    const token = jwt.sign(
+      { userId: user._id.toString() },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Create new session
+    const session = await Session.create({
+      userId: user._id,
+      token,
+      lastActive: new Date(),
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    // Log successful 2FA verification
+    await AuditLog.create({
+      userId: user._id,
+      action: 'verify_2fa',
+      status: 'success',
+      details: 'Successfully verified 2FA',
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    // Remove sensitive data
+    const userResponse = user.toObject();
+    delete userResponse.twoFactorSecret;
+    delete userResponse.backupCodes;
+
+    res.json({
+      token,
+      user: userResponse
+    });
+  } catch (error) {
+    console.error('Error in verify-2fa:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});
+
+router.post('/login', async (req, res) => {
+  try {
+    console.log('Login attempt:', req.body);
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required' });
+    }
+    
+    // Find user with all required fields
+    const user = await User.findOne({ email })
+      .select('+password +twoFactorSecret +twoFactorEnabled +backupCodes');
+    
+    console.log('User found:', user ? 'yes' : 'no', 'Has 2FA:', user?.twoFactorEnabled ? 'yes' : 'no');
+    
+    if (!user || !user.active) {
+      try {
+        await AuditLog.create({
+          userId: user?._id,
+          action: 'failed_login',
+          status: 'failure',
+          details: 'Invalid credentials or inactive account',
+          ipAddress: req.ip,
+          userAgent: req.headers['user-agent']
+        });
+      } catch (auditError) {
+        console.error('AuditLog error:', auditError);
+      }
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    // Verify password
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      await AuditLog.create({
+        userId: user._id,
+        action: 'failed_login',
+        status: 'failure',
+        details: 'Invalid password',
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent']
+      });
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    // If 2FA is enabled, return a temp token and require 2FA
+    if (user.twoFactorEnabled) {
+      return res.status(200).json({ 
+        message: '2FA code required',
+        requires2FA: true,
+        tempToken: jwt.sign(
+          { 
+            userId: user._id.toString(),
+            requiresVerification: true
+          },
+          process.env.JWT_SECRET,
+          { expiresIn: '5m' }
+        )
+      });
+    }
+      
+    // If no 2FA, create regular token and session
+    const token = jwt.sign(
+      { userId: user._id.toString() },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    // Create new session
+    const session = await Session.create({
+      userId: user._id,
+      token,
+      lastActive: new Date(),
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    // Log successful login
+    await AuditLog.create({
+      userId: user._id,
+      action: 'login',
+      status: 'success',
+      details: 'Successfully logged in',
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent']
+    });
+
+    // Remove sensitive data
+    const userResponse = user.toObject();
+    delete userResponse.password;
+    delete userResponse.twoFactorSecret;
+    delete userResponse.backupCodes;
+
+    res.json({
+      token,
+      user: userResponse
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ message: 'Internal server error' });
+  }
+});

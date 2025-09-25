@@ -1,0 +1,224 @@
+const Task = require('../models/Task');
+const Project = require('../models/Project');
+const Activity = require('../models/Activity');
+
+// Créer une nouvelle tâche
+exports.createTask = async (req, res) => {
+  try {
+    const project = await Project.findById(req.body.project);
+    if (!project) {
+      return res.status(404).json({ message: 'Projet non trouvé' });
+    }
+
+    const task = new Task({
+      ...req.body,
+      watchers: [req.user._id]
+    });
+    await task.save();
+
+    // Enregistrer l'activité
+    const activity = new Activity({
+      type: 'task_created',
+      user: req.user._id,
+      project: project._id,
+      task: task._id,
+      details: {
+        message: `Tâche "${task.title}" créée`
+      }
+    });
+    await activity.save();
+
+    res.status(201).json(task);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+// Récupérer toutes les tâches d'un projet
+exports.getTasks = async (req, res) => {
+  try {
+    const query = { isArchived: false };
+    
+    // Filtre par projet si spécifié
+    if (req.query.projectId) {
+      query.project = req.query.projectId;
+    }
+
+    // Filtre par statut si spécifié
+    if (req.query.status) {
+      query.status = req.query.status;
+    }
+
+    // Si l'utilisateur n'est pas admin, ne montrer que ses tâches assignées
+    if (!req.user.isAdmin) {
+      query.$or = [
+        { assignedTo: req.user._id },
+        { watchers: req.user._id }
+      ];
+    }
+
+    const tasks = await Task.find(query)
+      .populate('assignedTo', 'name email')
+      .populate('project', 'name')
+      .populate('comments.author', 'name email')
+      .sort('-updatedAt');
+
+    res.json(tasks);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Récupérer une tâche spécifique
+exports.getTask = async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id)
+      .populate('assignedTo', 'name email')
+      .populate('project', 'name')
+      .populate('comments.author', 'name email')
+      .populate('watchers', 'name email');
+
+    if (!task) {
+      return res.status(404).json({ message: 'Tâche non trouvée' });
+    }
+
+    // Vérifier les autorisations
+    if (!req.user.isAdmin && 
+        task.assignedTo?.toString() !== req.user._id.toString() && 
+        !task.watchers.includes(req.user._id)) {
+      return res.status(403).json({ message: 'Accès non autorisé' });
+    }
+
+    const activities = await Activity.find({ task: task._id })
+      .populate('user', 'name email')
+      .sort('-createdAt')
+      .limit(20);
+
+    res.json({
+      ...task.toObject(),
+      activities
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Mettre à jour une tâche
+exports.updateTask = async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id);
+    
+    if (!task) {
+      return res.status(404).json({ message: 'Tâche non trouvée' });
+    }
+
+    // Vérifier les autorisations
+    if (!req.user.isAdmin && task.assignedTo?.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'Accès non autorisé' });
+    }
+
+    const oldTask = task.toObject();
+    Object.assign(task, req.body);
+    await task.save();
+
+    // Si le statut a changé, enregistrer une activité spécifique
+    if (oldTask.status !== task.status) {
+      const activity = new Activity({
+        type: 'task_status_changed',
+        user: req.user._id,
+        project: task.project,
+        task: task._id,
+        details: {
+          oldValue: oldTask.status,
+          newValue: task.status,
+          message: `Statut de la tâche "${task.title}" changé de ${oldTask.status} à ${task.status}`
+        }
+      });
+      await activity.save();
+    }
+
+    res.json(task);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+// Ajouter un commentaire
+exports.addComment = async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.id);
+    
+    if (!task) {
+      return res.status(404).json({ message: 'Tâche non trouvée' });
+    }
+
+    const comment = {
+      content: req.body.content,
+      author: req.user._id,
+      attachments: req.body.attachments || []
+    };
+
+    task.comments.push(comment);
+    await task.save();
+
+    // Enregistrer l'activité
+    const activity = new Activity({
+      type: 'comment_added',
+      user: req.user._id,
+      project: task.project,
+      task: task._id,
+      details: {
+        message: `Nouveau commentaire ajouté à la tâche "${task.title}"`
+      }
+    });
+    await activity.save();
+
+    // Ajouter l'utilisateur aux observateurs s'il n'y est pas déjà
+    if (!task.watchers.includes(req.user._id)) {
+      task.watchers.push(req.user._id);
+      await task.save();
+    }
+
+    res.json(task);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+};
+
+// Récupérer les statistiques des tâches
+exports.getTaskStats = async (req, res) => {
+  try {
+    const projectId = req.query.projectId;
+    const query = { isArchived: false };
+    
+    if (projectId) {
+      query.project = projectId;
+    }
+
+    // Si l'utilisateur n'est pas admin, ne montrer que ses tâches
+    if (!req.user.isAdmin) {
+      query.assignedTo = req.user._id;
+    }
+
+    const tasks = await Task.find(query);
+    
+    const stats = {
+      total: tasks.length,
+      byStatus: {
+        todo: tasks.filter(t => t.status === 'todo').length,
+        in_progress: tasks.filter(t => t.status === 'in_progress').length,
+        in_review: tasks.filter(t => t.status === 'in_review').length,
+        done: tasks.filter(t => t.status === 'done').length
+      },
+      byPriority: {
+        low: tasks.filter(t => t.priority === 'low').length,
+        medium: tasks.filter(t => t.priority === 'medium').length,
+        high: tasks.filter(t => t.priority === 'high').length
+      }
+    };
+
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
